@@ -1,0 +1,4 @@
+# gaokun3: enable the auto-rotate Quick Settings switch for every user.
+# User changes still win, this only provides the system default.
+[org/gnome/shell]
+enabled-extensions=['ding@rastersoft.com', 'ubuntu-dock@ubuntu.com', 'tiling-assistant@ubuntu.com', 'snapd-search-provider@canonical.com', 'web-search-provider@ubuntu.com', 'gaokun3-autorotate@local']

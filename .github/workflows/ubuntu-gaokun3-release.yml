@@ -144,6 +144,19 @@ jobs:
             "$asset_url" \
             -o "$PACKAGE_DEBS_DIR/$asset_name"
 
+          # The sensor stack is published alongside the kernel packages.
+          sensor_manifest_name="sensor-manifest.json"
+          sensor_manifest_url="$(jq -r --arg name "$sensor_manifest_name" '.assets[] | select(.name == $name) | .url' "$release_json")"
+          if [[ -n "$sensor_manifest_url" && "$sensor_manifest_url" != "null" ]]; then
+            curl -fsSL \
+              -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+              -H "Accept: application/octet-stream" \
+              "$sensor_manifest_url" \
+              -o "$PACKAGE_DEBS_DIR/$sensor_manifest_name"
+          else
+            echo "::warning::release ${PACKAGE_RELEASE_TAG} has no ${sensor_manifest_name}; the image will lack the sensor stack"
+          fi
+
           manifest_path="$PACKAGE_DEBS_DIR/package-manifest.json"
           manifest_kernel_tag="$(jq -r '.kernel_tag' "$manifest_path")"
           manifest_build_el2="$(jq -r '.build_el2' "$manifest_path")"
@@ -174,6 +187,12 @@ jobs:
               "$(jq -r '.kernels.el2.packages.image' "$manifest_path")"
               "$(jq -r '.kernels.el2.packages.modules' "$manifest_path")"
             )
+          fi
+
+          if [[ -f "$PACKAGE_DEBS_DIR/sensor-manifest.json" ]]; then
+            while IFS= read -r sensor_deb; do
+              asset_names+=("$sensor_deb")
+            done < <(jq -r '.packages[]' "$PACKAGE_DEBS_DIR/sensor-manifest.json")
           fi
 
           for raw_name in "${asset_names[@]}"; do
@@ -237,7 +256,8 @@ jobs:
             update-locale LANG=zh_CN.UTF-8 LANGUAGE=zh_CN:en_US:en LC_MESSAGES=zh_CN.UTF-8
 
             apt-get install -y \
-              linux-base initramfs-tools kmod
+              linux-base initramfs-tools kmod \
+              qrtr-tools libqmi-glib5 libprotobuf-c1
 
             apt-get install -y --no-install-recommends \
               systemd-boot systemd-boot-efi
@@ -313,6 +333,14 @@ jobs:
             sudo cp "$PACKAGE_DEBS_DIR/$el2_modules_deb_name" "$ROOTFS_DIR/tmp/"
           fi
 
+          sensor_debs=()
+          if [[ -f "$PACKAGE_DEBS_DIR/sensor-manifest.json" ]]; then
+            while IFS= read -r sensor_deb; do
+              sudo cp "$PACKAGE_DEBS_DIR/$sensor_deb" "$ROOTFS_DIR/tmp/"
+              sensor_debs+=("/tmp/$sensor_deb")
+            done < <(jq -r '.packages[]' "$PACKAGE_DEBS_DIR/sensor-manifest.json")
+          fi
+
           sudo mount --bind /dev "$ROOTFS_DIR/dev"
           sudo mount --bind /dev/pts "$ROOTFS_DIR/dev/pts"
           sudo mount -t proc proc "$ROOTFS_DIR/proc"
@@ -322,6 +350,9 @@ jobs:
           chroot_debs="/tmp/$image_deb_name /tmp/$modules_deb_name /tmp/$firmware_deb_name"
           if [[ "$BUILD_EL2" == "true" ]]; then
             chroot_debs="$chroot_debs /tmp/$el2_image_deb_name /tmp/$el2_modules_deb_name"
+          fi
+          if [[ ${#sensor_debs[@]} -gt 0 ]]; then
+            chroot_debs="$chroot_debs ${sensor_debs[*]}"
           fi
 
           sudo chroot "$ROOTFS_DIR" /bin/bash -euxo pipefail -c '

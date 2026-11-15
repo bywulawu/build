@@ -1,0 +1,14 @@
+[Unit]
+Description=HexagonRPC server for the Qualcomm sensor DSP (gaokun3 SSC)
+# The DSP must be up before we can attach to its FastRPC node
+After=remoteproc-adsp.service
+ConditionPathExists=/dev/fastrpc-sdsp
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/hexagonrpcd -f /dev/fastrpc-sdsp -s -R /usr/share/qcom/sc8280xp/HUAWEI/gaokun3
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

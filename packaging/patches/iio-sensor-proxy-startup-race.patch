@@ -1,0 +1,17 @@
+diff --git a/src/iio-sensor-proxy.c b/src/iio-sensor-proxy.c
+index 9c7e8cd..3764af1 100644
+--- a/src/iio-sensor-proxy.c
++++ b/src/iio-sensor-proxy.c
+@@ -779,6 +779,12 @@ name_acquired_handler (GDBusConnection *connection,
+ 		}
+ 
+ 		DEVICE_FOR_TYPE(i) = sensor_device;
++
++		/* A client may have claimed this sensor before the startup scan
++		 * finished; start polling so it ever gets a reading. */
++		if (g_hash_table_size (data->clients[i]) > 0) {
++			driver_set_polling (sensor_device, TRUE);
++		}
+ 	}
+ 
+ 	if (!any_sensors_left (data))

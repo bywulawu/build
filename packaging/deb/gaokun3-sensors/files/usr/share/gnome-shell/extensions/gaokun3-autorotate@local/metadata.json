@@ -1,0 +1,7 @@
+{
+  "uuid": "gaokun3-autorotate@local",
+  "name": "Gaokun3 Auto Rotate",
+  "description": "Adds an Auto Rotate switch to Quick Settings. Turning it off stops the gaokun3 rotation daemon and returns the panel to landscape.",
+  "shell-version": ["50"],
+  "version": 1
+}

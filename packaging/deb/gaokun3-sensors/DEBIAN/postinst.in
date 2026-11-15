@@ -1,0 +1,20 @@
+#!/bin/bash
+set -e
+
+if [ -x /usr/bin/udevadm ]; then
+    udevadm control --reload-rules || true
+    udevadm trigger --subsystem-match=misc --sysname-match='fastrpc-sdsp*' || true
+fi
+
+if [ -x /usr/bin/dconf ]; then
+    dconf update || true
+fi
+
+if [ -x /bin/systemctl ]; then
+    # Works without a running systemd, so the image build picks it up too.
+    systemctl enable iio-sensor-proxy.service || true
+    systemctl daemon-reload || true
+    systemctl try-restart iio-sensor-proxy.service || true
+fi
+
+exit 0

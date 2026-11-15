@@ -1,0 +1,13 @@
+The SSC registry shipped in files/usr/share/qcom/sc8280xp/HUAWEI/gaokun3/sensors
+comes from the Windows installation of this machine model, not from
+linux-firmware. It holds the sensor definitions (config/) and the packaged
+registry (registry/) that Qualcomm's Snapdragon Sensor Core needs to
+enumerate and run the SH3001 accelerometer.
+
+persist/registry/ is shipped empty on purpose: the framework needs it to
+exist so it can map its writable registry there, but nothing the sensors
+behind iio-sensor-proxy need is stored in it, and the DSP does not recreate
+the factory calibration that used to live there.
+
+It is redistributed the same way the vendor firmware under firmware/ is, for
+the same machine only; no separate license text is available from the vendor.

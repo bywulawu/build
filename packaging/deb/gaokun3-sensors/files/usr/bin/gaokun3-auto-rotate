@@ -1,0 +1,198 @@
+#!/usr/bin/env python3
+"""Rotate the built-in panel with the accelerometer, without touch mode.
+
+GNOME only auto-rotates while the seat reports a tablet (SW_TABLET_MODE), and
+forcing that breaks the detachable keyboard and touchpad.  Instead, watch the
+orientation reported by iio-sensor-proxy and apply the matching transform
+directly through org.gnome.Mutter.DisplayConfig.
+"""
+import signal
+import sys
+import time
+
+import gi
+
+gi.require_version("Gio", "2.0")
+gi.require_version("GLibUnix", "2.0")
+from gi.repository import Gio, GLib, GLibUnix  # noqa: E402
+
+SENSOR_NAME = "net.hadess.SensorProxy"
+SENSOR_PATH = "/net/hadess/SensorProxy"
+
+MUTTER_NAME = "org.gnome.Mutter.DisplayConfig"
+MUTTER_PATH = "/org/gnome/Mutter/DisplayConfig"
+
+# iio-sensor-proxy orientation -> Mutter transform
+TRANSFORMS = {
+    "normal": 0,      # panel in its native orientation
+    "left-up": 1,     # rotated 90°
+    "bottom-up": 2,   # rotated 180°
+    "right-up": 3,    # rotated 270°
+}
+
+DEBOUNCE_MS = 250
+RETRY_MS = 2000
+# Mutters emits MonitorsChanged while our own config is still landing, so
+# ignore the signal for a moment after a successful apply.
+SETTLE_MS = 800
+
+
+class AutoRotate:
+    def __init__(self):
+        self.system_bus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+        self.session_bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        self.sensor = Gio.DBusProxy.new_sync(
+            self.system_bus, Gio.DBusProxyFlags.NONE, None,
+            SENSOR_NAME, SENSOR_PATH, SENSOR_NAME, None,
+        )
+        self.display = Gio.DBusProxy.new_sync(
+            self.session_bus, Gio.DBusProxyFlags.NONE, None,
+            MUTTER_NAME, MUTTER_PATH, MUTTER_NAME, None,
+        )
+        self.current = None
+        self.desired = None
+        self.pending = None
+        self.settle_until = 0.0
+
+        self.sensor.connect("g-properties-changed", self.on_properties_changed)
+        self.sensor.connect("notify::g-name-owner", self.on_sensor_owner_changed)
+        self.display.connect("g-signal", self.on_display_signal)
+        self.sensor.call_sync(
+            "ClaimAccelerometer", None, Gio.DBusCallFlags.NONE, -1, None
+        )
+        self.handle_orientation(self.orientation())
+
+    def orientation(self):
+        prop = self.sensor.get_cached_property("AccelerometerOrientation")
+        if prop is None:
+            return None
+        return prop.unpack()
+
+    def on_properties_changed(self, _proxy, changed, _invalidated):
+        if "AccelerometerOrientation" not in changed.unpack().keys():
+            return
+        self.handle_orientation(self.orientation())
+
+    def on_sensor_owner_changed(self, proxy, _pspec):
+        # A restarted iio-sensor-proxy drops every claim, so take it again.
+        if proxy.get_name_owner() is None:
+            return
+        try:
+            proxy.call_sync(
+                "ClaimAccelerometer", None, Gio.DBusCallFlags.NONE, -1, None
+            )
+        except Exception as err:  # noqa: BLE001
+            print(f"failed to re-claim accelerometer: {err}", flush=True)
+            return
+        self.handle_orientation(self.orientation())
+
+    def on_display_signal(self, _proxy, _sender, signal, _params):
+        # A monitor hotplug or a mode change resets the transform; re-apply.
+        if signal != "MonitorsChanged" or self.desired is None:
+            return
+        if time.monotonic() < self.settle_until:
+            return
+        try:
+            applied = self.current_state()[1]
+        except Exception as err:  # noqa: BLE001
+            print(f"failed to read state: {err}", flush=True)
+            return
+        self.current = applied
+        if applied != self.desired:
+            self.schedule(self.desired)
+
+    def current_state(self):
+        serial, monitors_info, logical, _props = self.display.call_sync(
+            "GetCurrentState", None, Gio.DBusCallFlags.NONE, -1, None
+        ).unpack()
+        transform = logical[0][3] if logical else None
+        return (serial, monitors_info, logical), transform
+
+    def handle_orientation(self, orientation):
+        transform = TRANSFORMS.get(orientation)
+        if transform is None:
+            return
+        self.desired = transform
+        if transform == self.current:
+            return
+        # Let the orientation settle: quick tilts emit a burst of updates.
+        self.schedule(transform)
+
+    def schedule(self, transform):
+        if transform is None:
+            return
+        if self.pending is not None:
+            GLib.source_remove(self.pending)
+        self.pending = GLib.timeout_add(DEBOUNCE_MS, self.apply, transform)
+
+    def apply(self, transform):
+        self.pending = None
+        try:
+            self.push_transform(transform)
+            self.current = transform
+            self.settle_until = time.monotonic() + SETTLE_MS / 1000
+            print(f"orientation -> transform {transform}", flush=True)
+        except Exception as err:  # noqa: BLE001 - keep running
+            print(f"failed to apply transform {transform}: {err}", flush=True)
+            # Mutter may not be up yet; retry until it accepts the config.
+            if self.desired == transform:
+                self.pending = GLib.timeout_add(RETRY_MS, self.apply, transform)
+        return GLib.SOURCE_REMOVE
+
+    def push_transform(self, transform):
+        (serial, monitors_info, logical), _ = self.current_state()
+        # An empty list would ask Mutter to disable every output.
+        if not logical:
+            raise RuntimeError("no logical monitors")
+        # ApplyMonitorsConfig still expects the old (connector, mode-id,
+        # properties) form, so look up which mode each output is using.
+        current_modes = {}
+        for connector_info, modes, _mon_props in monitors_info:
+            for mode in modes:
+                mode_id, _w, _h, _rate, _scale, _scales, mode_props = mode
+                if mode_props.get("is-current"):
+                    current_modes[connector_info[0]] = mode_id
+                    break
+        monitors = []
+        for x, y, scale, _old, primary, mon, _props in logical:
+            outputs = [
+                (output[0], current_modes.get(output[0], ""), {})
+                for output in mon
+            ]
+            monitors.append((x, y, scale, transform, primary, outputs))
+        self.display.call_sync(
+            "ApplyMonitorsConfig",
+            GLib.Variant(
+                "(uua(iiduba(ssa{sv}))a{sv})", (serial, 1, monitors, {})
+            ),
+            Gio.DBusCallFlags.NONE, -1, None,
+        )
+
+    def shutdown(self, loop):
+        # Stopping the service (the quick settings switch) locks the panel at
+        # its current rotation, so just drop any queued update and quit.
+        if self.pending is not None:
+            GLib.source_remove(self.pending)
+            self.pending = None
+        loop.quit()
+        return GLib.SOURCE_REMOVE
+
+
+def main():
+    while True:
+        try:
+            daemon = AutoRotate()
+            break
+        except Exception as err:  # noqa: BLE001
+            # iio-sensor-proxy may still be waiting for the sensor DSP.
+            print(f"startup failed, retrying: {err}", flush=True)
+            time.sleep(RETRY_MS / 1000)
+    daemon_loop = GLib.MainLoop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        GLibUnix.signal_add(GLib.PRIORITY_DEFAULT, sig, daemon.shutdown, daemon_loop)
+    daemon_loop.run()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
